@@ -2,15 +2,46 @@
 
 ## 1. Overview
 
-Build a desktop-first chess application whose primary purpose is to teach the user while they play. It also serves as a playable opponent and a post-game analysis tool. The initial release is a single-user desktop application with local game storage. The architecture should leave room for a hosted multi-user SaaS product later without adding cloud infrastructure to the first version.
+Build a browser-based chess application whose primary purpose is to teach the user while they play. It also serves as a playable opponent and a post-game analysis tool. The initial release is a single-user application with local game storage. The architecture should leave room for a hosted multi-user SaaS product later without requiring cloud infrastructure for the first version.
 
 The core teaching model combines a rules-aware game engine, chess engine analysis, and natural-language coaching:
 
 - `python-chess` owns the authoritative board state, legal move validation, game record, and game outcome.
-- Stockfish calculates candidate moves and evaluates positions.
+- Maia-3 selects human-like opponent moves at a configured skill target.
+- Stockfish calculates candidate moves and evaluates positions for requested analysis and review.
 - An OpenAI LLM turns selected engine findings and game context into verbal teaching explanations.
 - The application calibrates difficulty to the user's demonstrated skill, while allowing manual adjustment.
 - Voice interaction is a core product goal, supported by a graphical board and conventional controls.
+
+## Implementation status and handoff — 2026-10-16
+
+### Implemented
+
+- Browser UI built with React, TypeScript, Vite, and `react-chessboard`; the board and menus are interactive.
+- FastAPI service with `python-chess` as the authoritative rules and board-state layer.
+- Maia-3 is used for opponent moves; Stockfish is used for analysis and coaching context.
+- Basic game controls, move history, opponent-strength setting, and coaching-detail setting are wired to the API.
+- Player Elo is saved in SQLite, starts at 500 unless entered manually, and updates after completed games using the standard Elo formula (K=32) against Maia's configured level. New games default Maia to the nearest 50-point level below the player's rating (bounded by Maia's 400–1800 range); the manual opponent-strength control remains available during a game.
+- Player resignation is available during an active game and persists the result and resignation termination to SQLite and PGN.
+- Maia-3 automatically resigns after Stockfish evaluates it at −10.0 pawns or worse for three consecutive player turns; the losing streak is persisted with the game.
+- Stockfish flags player moves that lose at least 1.0 pawn as mistakes and at least 2.0 pawns as blunders, with the preferred move, principal line, and evaluation swing shown in the coach conversation.
+- On-demand hints, position explanations, and explanations of Maia's moves use Stockfish findings. An optional OpenAI Responses API tutor adds natural-language coaching; the local fallback remains available when the API key is not configured. The LLM cannot change the board.
+- **Live coaching verified:** the chat shows user questions and coach replies, scrolls through the conversation, and GPT-6 Luna with medium reasoning is responding as expected.
+- SQLite persistence has been implemented for games, moves, and user settings. Games are autosaved, the latest active game is restored on service startup, unfinished games are archived when a new game starts, saved games can be loaded, and games can be downloaded as PGN.
+- **Persistence complete:** manual checks have passed, including saved-game loading after a server restart.
+- The Vite development proxy defaults to API port `8001`; `CHESS_TUTOR_API_URL` can override the API address.
+
+### Not yet verified or still to build
+
+- Post-game review of key moments is implemented and manually verified. Manual opponent-strength control is implemented from 400 to 1800 Elo in 50-point steps; the newly added lower settings, automatic resignation, and move-quality feedback need playtesting. Automatic skill estimation is not implemented yet.
+- Voice work is deferred because this computer has no audio hardware; revisit it on an audio-capable computer.
+- The quality checks listed in §14 remain to be run.
+
+### Resume here
+
+1. **Complete:** Add manual opponent-strength control using 50-point Elo steps from 400 through 1800. Maia-3 accepts an integer Elo input and interpolates the skill conditioning continuously; lower settings are exploratory and need playtesting.
+2. Resume voice work on an audio-capable computer when available.
+3. Implement automatic skill estimation and phase-specific estimates as a later refinement.
 
 ## 2. Goals
 
@@ -30,7 +61,7 @@ The core teaching model combines a rules-aware game engine, chess engine analysi
 - A cloud database or server-dependent game session.
 - Replacing engine calculation with LLM-generated chess judgments.
 - Storing unrelated personal data or collecting a broad behavioral profile.
-- A mobile-first interface; desktop is the initial target because microphone and speaker use matter.
+- A mobile-first interface; the initial browser experience targets desktop-sized screens while remaining usable across platforms.
 
 ## 4. Product experience and UX
 
@@ -40,6 +71,7 @@ The core teaching model combines a rules-aware game engine, chess engine analysi
 - Provide move history, game controls (new game, resign, undo if enabled, review), and a compact status area for turn, clocks if introduced, and game result.
 - Include a conversation area for spoken and typed interaction, with a visible microphone state and a text transcript.
 - Offer settings for opponent strength and coaching preferences without interrupting a game.
+- Provide manual Maia strength control from 400 to 1800 Elo in 50-point steps.
 
 ### Coaching behavior
 
@@ -68,7 +100,7 @@ The core teaching model combines a rules-aware game engine, chess engine analysi
 
 ### Opponent
 
-- Use Stockfish to select legal candidate moves and evaluate positions.
+- Use Maia-3 to choose human-like opponent moves; use Stockfish for position evaluation and principal variations.
 - Configure the opponent to play slightly better than the user's current estimated level rather than always choosing the engine's strongest move.
 - Make the difficulty adjustment bounded and predictable, and allow manual override.
 - Preserve legal play even when analysis, LLM, or voice services fail.
@@ -92,14 +124,15 @@ The core teaching model combines a rules-aware game engine, chess engine analysi
 
 Use separable modules so that game correctness remains independent from teaching services.
 
-1. **Desktop UI** — board rendering, input, conversation, settings, and review navigation.
+1. **Web UI** — browser-based board rendering, input, conversation, settings, and review navigation.
 2. **Application/session coordinator** — sequences user actions, game events, engine requests, persistence, and tutor requests.
 3. **Game rules and records (`python-chess`)** — canonical board, legal moves, PGN/FEN handling, clocks if added, and game result. No other component may mutate the canonical position.
-4. **Opponent/analysis service (Stockfish)** — candidate moves, position evaluation, principal variations, and analysis metadata. Its output is advisory to the coordinator; the selected move must still be checked against the canonical legal move set.
-5. **Tutor service (OpenAI LLM)** — transforms a bounded, structured context into explanation or hint language. It does not adjudicate legality, invent engine evaluations, or directly change the board.
-6. **Voice adapter** — speech-to-text and text-to-speech integration, transcript/state management, interruption, and error handling. Keep this behind an interface so providers can change.
-7. **Persistence (SQLite)** — stores only played games and the minimum derived information needed for skill adaptation and review.
-8. **Skill model** — estimates overall and phase-specific strength from game evidence, with manual adjustment and confidence tracking.
+4. **Opponent service (Maia-3)** — human-like move predictions at a configurable Elo target through UCI. Its output is advisory; the selected move must still be checked against the canonical legal move set.
+5. **Analysis service (Stockfish)** — position evaluation, candidate lines, and analysis metadata for on-demand explanations and review. Its output is advisory and tied to the position being analyzed.
+6. **Tutor service (OpenAI LLM)** — transforms a bounded, structured context into explanation or hint language. It does not adjudicate legality, invent engine evaluations, or directly change the board.
+7. **Voice adapter** — speech-to-text and text-to-speech integration, transcript/state management, interruption, and error handling. Keep this behind an interface so providers can change.
+8. **Persistence (SQLite)** — stores only played games and the minimum derived information needed for skill adaptation and review.
+9. **Skill model** — estimates overall and phase-specific strength from game evidence, with manual adjustment and confidence tracking.
 
 The coordinator passes explicit, typed context between modules. Keep LLM prompts grounded in engine output and the actual game record. Do not expose arbitrary local data to the LLM.
 
@@ -107,14 +140,15 @@ The coordinator passes explicit, typed context between modules. Keep LLM prompts
 
 These are implementation proposals where the planning conversation did not prescribe a specific framework:
 
-- **Language:** Python for application logic and integration with `python-chess` and Stockfish.
+- **Language:** Python for application logic and integration with `python-chess`, Maia-3, and Stockfish.
 - **Rules and records:** `python-chess` as the authoritative game state and referee.
-- **Chess engine:** Stockfish as a locally run UCI engine, with configurable search limits.
-- **Desktop UI:** choose a Python desktop framework after a small interaction prototype; PySide/Qt is a reasonable candidate for a polished board, menus, and audio controls.
+- **Opponent engine:** Maia-3 as a UCI engine using its human move predictions and Elo input; begin with its 5M CPU model.
+- **Analysis engine:** Stockfish as a locally run UCI engine with configurable search limits, used for analysis and review rather than opponent moves.
+- **Web UI:** React and TypeScript in a modern browser, using the MIT-licensed `react-chessboard` component for board rendering and interaction. The UI communicates with a Python service through a typed API; keep local versus hosted deployment open until the first prototype clarifies the tradeoffs.
 - **Database:** SQLite, accessed through a small repository layer and versioned migrations.
 - **LLM:** OpenAI API through a tutor-service interface. Keep credentials outside the database and provide clear configuration/error handling.
 - **Voice:** provider-backed speech recognition and speech synthesis behind replaceable adapters. Select exact services after validating latency, quality, privacy, and platform support.
-- **Packaging:** a desktop installer/package for the target operating systems, with Stockfish distribution/licensing reviewed as part of release planning.
+- **Packaging:** initially serve the web UI through the chosen local or hosted Python service. Review platform and engine packaging needs before release.
 
 ## 8. Data model and proposed SQLite schema
 
@@ -179,15 +213,14 @@ Start with an explainable model rather than a complex hidden rating system.
 
 The scale, update equations, confidence thresholds, and behavior for manual override remain implementation decisions to settle with empirical playtesting.
 
-## 10. Stockfish and LLM interaction flow
+## 10. Maia-3, Stockfish, and LLM interaction flow
 
 ### Opponent move
 
 1. Receive a user move from UI or voice and parse it against the current legal moves.
 2. Apply it through `python-chess`; update the canonical PGN and position.
-3. Ask Stockfish for candidate moves/evaluation using a time or node budget appropriate to desktop responsiveness.
-4. Choose an opponent move at the configured skill target. Apply deliberate strength limiting in the opponent policy, not by asking the LLM to choose a move.
-5. Validate the selected move against `python-chess` legal moves and apply it through the rules layer.
+3. Ask Maia-3 for a human-like move at the configured Elo using its UCI interface and one-node inference.
+4. Validate the selected move against `python-chess` legal moves and apply it through the rules layer.
 6. Persist the move/game state and update skill evidence as appropriate.
 7. Wait for the user to ask before providing coaching.
 
@@ -195,7 +228,7 @@ The scale, update equations, confidence thresholds, and behavior for manual over
 
 1. Classify the user's request into explanation, hint, position analysis, or review follow-up.
 2. Collect a minimal context bundle: current FEN, relevant move history, whose move it is, skill estimate/confidence, user request, and relevant Stockfish lines/evaluations.
-3. Ask Stockfish for additional analysis if current evidence is insufficient.
+3. Ask Stockfish for additional analysis if current evidence is insufficient; do not treat Maia-3's human-game WDL or compatibility score as a search evaluation.
 4. Prompt the LLM to explain the supplied evidence in the requested depth. Require it to distinguish a concrete engine-backed threat/line from a general strategic idea and avoid unsupported certainty.
 5. For hints, progressively reveal information and do not provide the complete move unless the user asks.
 6. Return text to the conversation UI and optionally speak it through the voice adapter.
@@ -215,8 +248,8 @@ Do not rely on speech recognition alone to mutate the board. `python-chess` rema
 
 ## 12. MVP scope
 
-1. Desktop window with a graphical standard chessboard, move list, and basic game controls.
-2. Local single-user game against Stockfish with opponent strength configured slightly above the user's initial/manual skill estimate.
+1. Browser-based interface with a graphical standard chessboard, move list, and basic game controls.
+2. Local single-user game against Maia-3 with opponent strength configured near the user's initial/manual skill estimate.
 3. `python-chess` authoritative rules, legal moves, game endings, and PGN export/storage.
 4. SQLite persistence for played games and basic overall skill estimate.
 5. Typed on-demand questions, explanations, and hints using Stockfish-backed context and the OpenAI LLM.
@@ -228,28 +261,33 @@ Do not rely on speech recognition alone to mutate the board. `python-chess` rema
 
 ### Milestone 1 — Technical and interaction prototype
 
-- Confirm desktop framework, board interaction, Stockfish invocation, and voice-provider feasibility.
+- **Status: Core browser and engine integration implemented; voice feasibility remains open.**
+- Confirm the web frontend, board interaction, Maia-3 opponent, Stockfish analysis service, and voice-provider feasibility.
 - Define the skill scale and structured interfaces for engine/tutor/voice modules.
-- Validate that the target desktop environment supports the intended microphone and speaker flow.
+- Validate browser microphone and speaker support for the intended voice flow.
 
 ### Milestone 2 — Reliable local chess game
 
-- Build the board, move list, game coordinator, `python-chess` rules flow, and Stockfish opponent.
+- **Status: Complete for the current local-game scope; persistence behavior has been manually checked and accepted.**
+- Build the board, move list, game coordinator, `python-chess` rules flow, Maia-3 opponent, and Stockfish analysis service.
 - Add game persistence and PGN round-trip.
 - Handle engine unavailability and illegal/malformed input without corrupting game state.
 
 ### Milestone 3 — Tutor and review
 
+- **Status: On-demand coaching, live GPT-6 Luna integration, conversation UI, and Stockfish-grounded post-game review are implemented and manually verified.**
 - Add typed questions, engine-grounded explanations, graduated hints, and post-game review.
 - Tune explanation depth and ensure the LLM cannot alter game state or claim unsupported calculations.
 
 ### Milestone 4 — Voice interaction
 
+- **Status: Deferred until work resumes on a computer with audio hardware.**
 - Add speech input/output, transcripts, listening/speaking indicators, interruption, and ambiguity handling.
 - Test spoken move resolution against legal moves and noisy/ambiguous input.
 
 ### Milestone 5 — Adaptive strength and refinement
 
+- **Status: Manual opponent-strength adjustment is implemented in 50-point steps from 400 to 1800 Elo. Automatic skill updates and phase estimates remain later work.**
 - Add automatic skill updates, manual adjustment, opponent target tuning, and confidence display/handling.
 - Add phase-specific estimates when sufficient evidence exists.
 - Refine packaging, recovery behavior, accessibility, and onboarding.
@@ -257,7 +295,7 @@ Do not rely on speech recognition alone to mutate the board. `python-chess` rema
 ## 14. Testing and quality plan
 
 - **Rules integrity:** verify legal move handling, check/checkmate, stalemate, draws, resignation, PGN save/load, and recovery from invalid input.
-- **Engine boundary:** verify selected Stockfish moves are legal and tied to the requested position; test timeout and process failure behavior.
+- **Engine boundary:** verify Maia-3 moves are legal and tied to the requested position; verify Stockfish analysis is tied to the requested position; test timeout and process failure behavior.
 - **Tutor grounding:** use representative positions to check that explanations reflect supplied engine lines, are understandable at varied skill levels, and do not invent certainty. Test graduated hints and “explain opponent move” requests.
 - **Skill adaptation:** simulate varied game outcomes and move-quality evidence; check bounds, manual adjustment, confidence behavior, and phase fallback.
 - **Persistence:** test schema migrations, game round-trip, interrupted sessions, and database recovery behavior.
@@ -272,7 +310,7 @@ Do not rely on speech recognition alone to mutate the board. `python-chess` rema
 - **Skill estimates overreact to limited data:** track confidence/sample size, damp updates, and fall back to the overall estimate.
 - **Voice misrecognizes a move:** confirm ambiguity and validate every move through legal moves before application.
 - **Voice or LLM service is unavailable:** keep the game playable and provide typed/local fallbacks where possible.
-- **Desktop packaging and Stockfish distribution add complexity:** prototype early and review platform and licensing needs before release.
+- **Engine packaging and distribution add complexity:** keep Maia-3 and Stockfish behind separate UCI adapters and review platform needs before release.
 - **External service privacy and cost:** minimize sent context, avoid raw-audio retention by default, disclose when cloud services are used, and allow voice/tutor features to fail independently of local play.
 - **Engine analysis adds latency:** use bounded searches, cache by position, and provide responsive progress/status feedback.
 
@@ -292,11 +330,11 @@ These are future design considerations, not requirements for the MVP.
 
 ## 17. Decisions to resolve during implementation
 
-- Target operating systems and final desktop UI framework.
+- Local-service versus hosted deployment for the initial web application.
 - Exact speech recognition and synthesis providers, including whether local speech options are viable.
 - OpenAI model/configuration and user-facing credential setup.
 - Skill-estimate scale, update rules, confidence thresholds, and manual-override policy.
-- Stockfish version, strength-limiting method, and per-move analysis budgets.
+- Maia-3 model/Elo configuration and Stockfish version and analysis budgets.
 - Whether to support clocks, undo, custom positions, and in-progress game recovery in the MVP.
 - Whether transcripts are stored; default should be ephemeral unless a concrete feature requires retention.
 - Packaging, update, and engine licensing/distribution approach.
