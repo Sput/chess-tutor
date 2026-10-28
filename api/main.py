@@ -26,6 +26,29 @@ from storage import GameStore, restore_board
 logger = logging.getLogger(__name__)
 
 
+def load_project_env() -> None:
+    """Load simple KEY=value entries from the project-root .env file."""
+    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+    try:
+        with open(env_path, encoding="utf-8") as env_file:
+            for line in env_file:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '\"'):
+                    value = value[1:-1]
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except FileNotFoundError:
+        pass
+
+
+load_project_env()
+
+
 def stockfish_command() -> Optional[List[str]]:
     configured = os.environ.get("STOCKFISH_EXECUTABLE")
     executable = configured or shutil.which("stockfish")

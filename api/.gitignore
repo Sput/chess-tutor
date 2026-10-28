@@ -2,3 +2,6 @@
 __pycache__/
 .python-version
 .data/
+
+# Secrets are stored in the repository-root .env file.
+../.env

@@ -99,6 +99,7 @@ export default function App() {
   const [reviewError, setReviewError] = useState<string | null>(null);
   const [selectedReviewPly, setSelectedReviewPly] = useState<number | null>(null);
   const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
+  const [optimisticFen, setOptimisticFen] = useState<string | null>(null);
   const [, setMessage] = useState('Connecting to the game service…');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { id: 0, role: 'coach', text: 'Your tutor is ready when you are. Ask for a hint or an explanation at any time.' },
@@ -147,6 +148,7 @@ export default function App() {
         body: JSON.stringify({ from, to, promotion }),
       });
       setGame(snapshot);
+      setOptimisticFen(null);
       setReview(null);
       setSelectedReviewPly(null);
       if (snapshot.move_feedback) addChatMessage('coach', snapshot.move_feedback.message, snapshot.can_undo_move);
@@ -161,6 +163,7 @@ export default function App() {
       const detail = error instanceof Error ? error.message : 'The move could not be sent.';
       setMessage(detail);
       addChatMessage('coach', `I couldn't finish that turn: ${detail}`);
+      setOptimisticFen(null);
       await refreshGame();
     } finally {
       setBusy(false);
@@ -198,8 +201,33 @@ export default function App() {
       setPendingPromotion({ from: sourceSquare, to: targetSquare });
       return false;
     }
+    const files = 'abcdefgh';
+    const ranks = '87654321';
+    const squares = game.fen.split(' ')[0].split('/').map((row) => {
+      const expanded: string[] = [];
+      for (const char of row) char >= '1' && char <= '8' ? expanded.push(...Array(Number(char)).fill('')) : expanded.push(char);
+      return expanded;
+    });
+    const fromFile = files.indexOf(sourceSquare[0]);
+    const fromRank = ranks.indexOf(sourceSquare[1]);
+    const toFile = files.indexOf(targetSquare[0]);
+    const toRank = ranks.indexOf(targetSquare[1]);
+    if (fromFile < 0 || fromRank < 0 || toFile < 0 || toRank < 0) return false;
+    const movingPiece = squares[fromRank][fromFile];
+    squares[fromRank][fromFile] = '';
+    squares[toRank][toFile] = movingPiece;
+    const placement = squares.map((row) => {
+      let result = ''; let empty = 0;
+      for (const square of row) {
+        if (!square) empty++;
+        else { if (empty) result += empty; result += square; empty = 0; }
+      }
+      if (empty) result += empty;
+      return result;
+    }).join('/');
+    setOptimisticFen(`${placement} ${game.turn === 'white' ? 'b' : 'w'} ${game.fen.split(' ').slice(2).join(' ')}`);
     void submitMove(sourceSquare, targetSquare);
-    return false;
+    return true;
   }
 
   async function startNewGame() {
@@ -342,7 +370,7 @@ export default function App() {
     }
   }
 
-  const boardPosition = game?.fen ?? openingFen;
+  const boardPosition = optimisticFen ?? game?.fen ?? openingFen;
   const selectedMoment = review?.moments.find((moment) => moment.ply === selectedReviewPly) ?? null;
   const displayedBoardPosition = review?.game_id === game?.game_id && selectedMoment
     ? selectedMoment.fen_after
@@ -396,7 +424,15 @@ export default function App() {
             <div className="player-row"><div className="player-piece user-avatar">♙</div><div className="player-info"><strong>You</strong><span>{playerStatus}</span></div><span className="rating">{game?.player_rating ? game.player_rating : 'Unrated'}</span></div>
           </div>
 
-          <div className="moves-card"><div className="section-title"><h2>Move history</h2><div className="move-actions"><button className="subtle-button" onClick={analyzePosition} disabled={!game?.analysis_engine_available || analyzing || busy || coaching || reviewingGame}>{analyzing ? 'Analyzing…' : 'Analyze position'}</button>{game?.game_over && <button className="review-button" onClick={() => void reviewCompletedGame()} disabled={!game.analysis_engine_available || reviewingGame}>{reviewingGame ? 'Reviewing game…' : 'Review game'}</button>}</div></div><div className="move-list">{game?.moves.length ? game.moves.map((move) => <span className="move-entry" key={move.ply}><span className="move-number">{move.ply % 2 === 1 ? `${Math.ceil(move.ply / 2)}.` : ''}</span><span className={`move-cell ${selectedReviewPly === move.ply ? 'current' : ''}`}>{move.san}</span></span>) : <span className="empty-moves">Moves will appear here</span>}</div></div>
+          <div className="moves-card"><div className="section-title"><h2>Move history</h2><div className="move-actions"><button className="subtle-button" onClick={analyzePosition} disabled={!game?.analysis_engine_available || analyzing || busy || coaching || reviewingGame}>{analyzing ? 'Analyzing…' : 'Analyze position'}</button>{game?.game_over && <button className="review-button" onClick={() => void reviewCompletedGame()} disabled={!game.analysis_engine_available || reviewingGame}>{reviewingGame ? 'Reviewing game…' : 'Review game'}</button>}</div></div><div className="move-list">{game?.moves.length ? Array.from({ length: Math.ceil(game.moves.length / 2) }, (_, index) => {
+            const whiteMove = game.moves[index * 2];
+            const blackMove = game.moves[index * 2 + 1];
+            return <span className="move-entry" key={index}>
+              <span className="move-number">{index + 1}.</span>
+              <span className={`move-cell ${selectedReviewPly === whiteMove.ply ? 'current' : ''}`}>{whiteMove.san}</span>
+              {blackMove && <span className={`move-cell ${selectedReviewPly === blackMove.ply ? 'current' : ''}`}>{blackMove.san}</span>}
+            </span>;
+          }) : <span className="empty-moves">Moves will appear here</span>}</div></div>
           {reviewError && <div className="review-card review-error" role="alert">{reviewError}</div>}
           {review && review.game_id === game?.game_id && <section className="review-card" aria-label="Post-game review">
             <div className="review-heading"><div><p className="eyebrow">POST-GAME REVIEW</p><h2>Key moments</h2></div><button className="subtle-button" onClick={() => { setReview(null); setSelectedReviewPly(null); }}>Close</button></div>
