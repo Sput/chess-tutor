@@ -348,8 +348,21 @@ class GameService:
             replay.push(move)
 
         outcome = board.outcome()
+        captured_by_white: List[str] = []
+        captured_by_black: List[str] = []
+        capture_replay = chess.Board(self.initial_fen)
+        for move in board.move_stack:
+            if capture_replay.is_capture(move):
+                captured_piece = capture_replay.piece_at(move.to_square)
+                if captured_piece is None and capture_replay.is_en_passant(move):
+                    captured_piece = chess.Piece(chess.PAWN, not capture_replay.turn)
+                if captured_piece:
+                    (captured_by_white if capture_replay.turn == chess.WHITE else captured_by_black).append(captured_piece.symbol())
+            capture_replay.push(move)
         return {
             "fen": board.fen(),
+            "captured_by_white": captured_by_white,
+            "captured_by_black": captured_by_black,
             "game_id": self.game_id,
             "turn": "white" if board.turn == chess.WHITE else "black",
             "moves": move_records,
@@ -594,6 +607,21 @@ class GameService:
             if saved_game["status"] == "abandoned":
                 self.store.activate(game_id)
             return self.snapshot()
+
+    def evaluate_position(self) -> Dict[str, Any]:
+        with self.lock:
+            if self.analysis is None:
+                raise HTTPException(status_code=503, detail=self.analysis_error or "Stockfish is unavailable.")
+            board = self.board.copy()
+            try:
+                info = self.analysis.analyse(board, chess.engine.Limit(time=0.2))
+            except (chess.engine.EngineError, chess.engine.EngineTerminatedError, TimeoutError) as exc:
+                safe_quit(self.analysis)
+                self.analysis = None
+                self.analysis_error = "Stockfish evaluation failed: {}".format(exc)
+                raise HTTPException(status_code=503, detail=self.analysis_error)
+            score = info["score"].pov(chess.WHITE)
+            return {"fen": board.fen(), "score_cp_white": score.score(), "mate_white": score.mate(), "depth": info.get("depth", 0)}
 
     def analyze_position(self, multipv: int) -> Dict[str, Any]:
         with self.lock:
@@ -999,6 +1027,11 @@ def update_settings(request: SettingsRequest) -> Dict[str, Any]:
 @app.post("/api/moves")
 def make_move(request: MoveRequest) -> Dict[str, Any]:
     return service.play_user_move(request)
+
+
+@app.post("/api/evaluation")
+def evaluate_position() -> Dict[str, Any]:
+    return service.evaluate_position()
 
 
 @app.post("/api/analysis")

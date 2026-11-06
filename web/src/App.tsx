@@ -14,6 +14,8 @@ type SavedGame = {
 };
 type GameSnapshot = {
   fen: string;
+  captured_by_white: string[];
+  captured_by_black: string[];
   game_id: number;
   turn: 'white' | 'black';
   moves: MoveRecord[];
@@ -41,6 +43,7 @@ type GameSnapshot = {
 };
 type AnalysisLine = { rank: number; score_cp_white: number | null; mate_white: number | null; pv_san: string[] };
 type AnalysisResult = { fen: string; depth: number; lines: AnalysisLine[] };
+type PositionEvaluation = { fen: string; score_cp_white: number | null; mate_white: number | null; depth: number };
 type ReviewMoment = {
   ply: number;
   move_number: number;
@@ -90,6 +93,7 @@ export default function App() {
   const [game, setGame] = useState<GameSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [evaluation, setEvaluation] = useState<PositionEvaluation | null>(null);
   const [coaching, setCoaching] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [ratingDraft, setRatingDraft] = useState<string | null>(null);
@@ -138,6 +142,18 @@ export default function App() {
   }, []);
 
   useEffect(() => { void refreshGame(); void refreshSavedGames(); }, [refreshGame, refreshSavedGames]);
+
+  useEffect(() => {
+    if (!game?.analysis_engine_available) { setEvaluation(null); return; }
+    let active = true;
+    const fen = game.fen;
+    const timer = window.setTimeout(() => {
+      void apiRequest<PositionEvaluation>('/api/evaluation', { method: 'POST' })
+        .then((result) => { if (active && result.fen === fen) setEvaluation(result); })
+        .catch(() => { if (active) setEvaluation(null); });
+    }, 250);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [game?.fen, game?.analysis_engine_available]);
 
   async function submitMove(from: string, to: string, promotion?: string) {
     setBusy(true);
@@ -371,6 +387,16 @@ export default function App() {
   }
 
   const boardPosition = optimisticFen ?? game?.fen ?? openingFen;
+  const pieceGlyph: Record<string, string> = { p: '♟', n: '♞', b: '♝', r: '♜', q: '♛', P: '♙', N: '♘', B: '♗', R: '♖', Q: '♕' };
+  const materialValues: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9 };
+  const whiteMaterial = (game?.captured_by_white ?? []).reduce((sum, piece) => sum + (materialValues[piece.toLowerCase()] ?? 0), 0);
+  const blackMaterial = (game?.captured_by_black ?? []).reduce((sum, piece) => sum + (materialValues[piece.toLowerCase()] ?? 0), 0);
+  const scoreText = whiteMaterial === blackMaterial ? 'Even' : `${whiteMaterial > blackMaterial ? 'You' : 'Maia-3'} +${Math.abs(whiteMaterial - blackMaterial)}`;
+  const evaluationText = evaluation?.mate_white != null
+    ? `Mate ${evaluation.mate_white > 0 ? 'in ' + evaluation.mate_white : 'against you in ' + Math.abs(evaluation.mate_white)}`
+    : evaluation?.score_cp_white != null
+      ? `${evaluation.score_cp_white > 0 ? '+' : ''}${(evaluation.score_cp_white / 100).toFixed(1)} pawns ${evaluation.score_cp_white > 0 ? 'for you' : evaluation.score_cp_white < 0 ? 'for Maia-3' : '· even'}`
+      : game?.analysis_engine_available ? 'Evaluating…' : 'Unavailable';
   const selectedMoment = review?.moments.find((moment) => moment.ply === selectedReviewPly) ?? null;
   const displayedBoardPosition = review?.game_id === game?.game_id && selectedMoment
     ? selectedMoment.fen_after
@@ -412,16 +438,16 @@ export default function App() {
 
       <div className="workspace">
         <section className="play-column" aria-label="Chess game">
-          <div className="game-heading"><div><p className="eyebrow">PLAY & LEARN</p><h1>A thoughtful game</h1></div><div className="game-controls"><button className="resign-button" onClick={() => void resignGame()} disabled={!game || game.game_over || busy || coaching || analyzing || reviewingGame || savingSettings}>Resign</button><button className="new-game" onClick={startNewGame} disabled={busy || coaching || analyzing || reviewingGame || savingSettings}><span>＋</span> New game</button></div></div>
+          <div className="game-heading"><div><p className="eyebrow">PLAY & LEARN</p><h1>A thoughtful game</h1></div><div className="game-controls"><div className="live-score" aria-live="polite"><span>Stockfish · White POV</span><strong>{evaluationText}</strong><span>Material</span><strong>{scoreText}</strong></div><button className="resign-button" onClick={() => void resignGame()} disabled={!game || game.game_over || busy || coaching || analyzing || reviewingGame || savingSettings}>Resign</button><button className="new-game" onClick={startNewGame} disabled={busy || coaching || analyzing || reviewingGame || savingSettings}><span>＋</span> New game</button></div></div>
 
           <div className="board-card">
-            <div className="opponent-row"><div className="player-piece engine-avatar">♟</div><div className="player-info"><strong>Maia-3</strong><span>{busy ? 'Thinking…' : 'Human-like opponent'}</span></div><span className="rating">~{game?.maia_elo ?? 1200}</span></div>
+            <div className="opponent-row"><div className="player-piece engine-avatar">♟</div><div className="player-info"><strong>Maia-3</strong><span>{busy ? 'Thinking…' : 'Human-like opponent'}</span></div><span className="captured-pieces" aria-label={`Pieces captured by Maia-3: ${(game?.captured_by_black ?? []).map((piece) => pieceGlyph[piece]).join(' ') || 'none'}`}>{(game?.captured_by_black ?? []).map((piece, index) => <span key={index}>{pieceGlyph[piece]}</span>)}</span><span className="rating">~{game?.maia_elo ?? 1200}</span></div>
             {displayedIsCheckmate ? <div className="board-state-alert checkmate-alert" role="status"><span className="alert-symbol">♚</span><div><strong>CHECKMATE</strong><span>{game?.result === '1-0' ? 'You won the game.' : 'Maia-3 won the game.'}</span></div></div> : game?.termination === 'resignation' ? <div className="board-state-alert checkmate-alert" role="status"><span className="alert-symbol">♚</span><div><strong>{game.result === '1-0' ? 'MAIA-3 RESIGNS' : 'YOU RESIGNED'}</strong><span>{game.result === '1-0' ? 'You won the game.' : 'Maia-3 won the game.'}</span></div></div> : displayedIsCheck ? <div className="board-state-alert check-alert" role="alert"><span className="alert-symbol">!</span><div><strong>CHECK</strong><span>{displayedTurn === 'white' ? 'Your king is under attack. Find a legal response.' : 'Maia-3’s king is under attack.'}</span></div></div> : null}
             <div className="board-wrap">
               <Chessboard options={{ position: displayedBoardPosition, squareStyles: checkSquareStyles, onPieceDrop, boardOrientation: 'white', allowDragging: canMove, animationDurationInMs: 180, boardStyle: { borderRadius: '8px', boxShadow: '0 3px 18px rgba(32, 45, 39, 0.12)' }, darkSquareStyle: { backgroundColor: '#78917f' }, lightSquareStyle: { backgroundColor: '#edf0e6' }, showNotation: true }} />
               {pendingPromotion && <div className="promotion-shade" role="dialog" aria-label="Choose a promotion piece"><div className="promotion-dialog"><strong>Promote pawn to</strong><div>{[['q', '♕'], ['r', '♖'], ['b', '♗'], ['n', '♘']].map(([piece, glyph]) => <button key={piece} onClick={() => void submitMove(pendingPromotion.from, pendingPromotion.to, piece)} aria-label={`Promote to ${piece}`}>{glyph}</button>)}</div><button className="cancel-promotion" onClick={() => setPendingPromotion(null)}>Cancel</button></div></div>}
             </div>
-            <div className="player-row"><div className="player-piece user-avatar">♙</div><div className="player-info"><strong>You</strong><span>{playerStatus}</span></div><span className="rating">{game?.player_rating ? game.player_rating : 'Unrated'}</span></div>
+            <div className="player-row"><div className="player-piece user-avatar">♙</div><div className="player-info"><strong>You</strong><span>{playerStatus}</span></div><span className="captured-pieces" aria-label={`Pieces captured by you: ${(game?.captured_by_white ?? []).map((piece) => pieceGlyph[piece]).join(' ') || 'none'}`}>{(game?.captured_by_white ?? []).map((piece, index) => <span key={index}>{pieceGlyph[piece]}</span>)}</span><span className="rating">{game?.player_rating ? game.player_rating : 'Unrated'}</span></div>
           </div>
 
           <div className="moves-card"><div className="section-title"><h2>Move history</h2><div className="move-actions"><button className="subtle-button" onClick={analyzePosition} disabled={!game?.analysis_engine_available || analyzing || busy || coaching || reviewingGame}>{analyzing ? 'Analyzing…' : 'Analyze position'}</button>{game?.game_over && <button className="review-button" onClick={() => void reviewCompletedGame()} disabled={!game.analysis_engine_available || reviewingGame}>{reviewingGame ? 'Reviewing game…' : 'Review game'}</button>}</div></div><div className="move-list">{game?.moves.length ? Array.from({ length: Math.ceil(game.moves.length / 2) }, (_, index) => {
