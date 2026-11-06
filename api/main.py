@@ -190,6 +190,10 @@ class MoveRequest(BaseModel):
         allow_population_by_field_name = True
 
 
+class NewGameRequest(BaseModel):
+    user_color: Literal["white", "black"] = "white"
+
+
 class AnalysisRequest(BaseModel):
     multipv: int = Field(default=3, ge=1, le=5)
 
@@ -213,6 +217,7 @@ class GameService:
     def __init__(self) -> None:
         self.store = GameStore()
         self.board = chess.Board()
+        self.user_color = "white"
         self.initial_fen = self.board.fen()
         self.game_id = 0
         self.started_at = ""
@@ -247,6 +252,7 @@ class GameService:
         if saved_game:
             try:
                 self.board = restore_board(saved_game)
+                self.user_color = saved_game.get("user_color", "white")
                 self.initial_fen = saved_game["initial_fen"]
                 self.game_id = int(saved_game["id"])
                 self.started_at = saved_game["started_at"]
@@ -258,16 +264,17 @@ class GameService:
                 self._create_fresh_game()
         else:
             self._create_fresh_game()
-    def _create_fresh_game(self) -> None:
+    def _create_fresh_game(self, user_color: str = "white") -> None:
         self._set_strength_for_new_game()
         self.board = chess.Board()
+        self.user_color = user_color
         self.resigned = False
         self.resignation_result = None
         self.maia_losing_streak = 0
         self.last_move_feedback = None
         self.undo_state = None
         self.initial_fen = self.board.fen()
-        self.game_id = self.store.create_game()
+        self.game_id = self.store.create_game(user_color)
         record = self.store.load_game(self.game_id)
         self.started_at = record["started_at"] if record else datetime.now().astimezone().isoformat()
 
@@ -364,6 +371,7 @@ class GameService:
             "captured_by_white": captured_by_white,
             "captured_by_black": captured_by_black,
             "game_id": self.game_id,
+            "user_color": self.user_color,
             "turn": "white" if board.turn == chess.WHITE else "black",
             "moves": move_records,
             "last_move": board.peek().uci() if board.move_stack else None,
@@ -395,7 +403,8 @@ class GameService:
                 raise HTTPException(status_code=503, detail=self.opponent_error or "Maia-3 is unavailable.")
             if self.board.is_game_over():
                 raise HTTPException(status_code=409, detail="This game is over. Start a new game to continue.")
-            if self.board.turn != chess.WHITE:
+            player_turn = chess.WHITE if self.user_color == "white" else chess.BLACK
+            if self.board.turn != player_turn:
                 raise HTTPException(status_code=409, detail="It is not your turn.")
 
             try:
@@ -426,13 +435,13 @@ class GameService:
                     try:
                         self.store.resign_game(
                             self.game_id, self.board, self.initial_fen, self.started_at,
-                            result="1-0", maia_losing_streak=self.maia_losing_streak,
+                            result="0-1" if self.user_color == "black" else "1-0", maia_losing_streak=self.maia_losing_streak,
                         )
                     except Exception as exc:
                         self.board = previous_board
                         raise HTTPException(status_code=503, detail=f"Could not save Maia's resignation: {exc}")
                     self.resigned = True
-                    self.resignation_result = "1-0"
+                    self.resignation_result = "0-1" if self.user_color == "black" else "1-0"
                     self._apply_rating_if_game_complete()
                     return self.snapshot()
 
@@ -492,12 +501,21 @@ class GameService:
             self.move_analysis_notice = None
             return self.snapshot()
 
-    def start_new_game(self) -> Dict[str, Any]:
+    def start_new_game(self, user_color: str = "white") -> Dict[str, Any]:
         with self.lock:
             if not self.board.is_game_over() and not self.resigned:
                 self.store.save_position(self.game_id, self.board, self.initial_fen, self.started_at)
                 self.store.abandon(self.game_id)
-            self._create_fresh_game()
+            self._create_fresh_game(user_color)
+            if user_color == "black" and self.opponent is not None:
+                try:
+                    opening_move = self.opponent.play(self.board, chess.engine.Limit(nodes=1)).move
+                    if opening_move not in self.board.legal_moves:
+                        raise chess.engine.EngineError("Maia-3 returned an illegal opening move.")
+                    self.board.push(opening_move)
+                    self.store.save_position(self.game_id, self.board, self.initial_fen, self.started_at)
+                except (chess.engine.EngineError, chess.engine.EngineTerminatedError, TimeoutError) as exc:
+                    raise HTTPException(status_code=503, detail=f"Maia-3 could not make its opening move: {exc}")
             return self.snapshot()
 
     def resign_game(self) -> Dict[str, Any]:
@@ -507,12 +525,12 @@ class GameService:
             try:
                 self.store.resign_game(
                     self.game_id, self.board, self.initial_fen, self.started_at,
-                    result="0-1", maia_losing_streak=self.maia_losing_streak,
+                    result="0-1" if self.user_color == "white" else "1-0", maia_losing_streak=self.maia_losing_streak,
                 )
             except Exception as exc:
                 raise HTTPException(status_code=503, detail=f"Could not save the resignation locally: {exc}")
             self.resigned = True
-            self.resignation_result = "0-1"
+            self.resignation_result = "0-1" if self.user_color == "white" else "1-0"
             self._apply_rating_if_game_complete()
             return self.snapshot()
 
@@ -527,8 +545,9 @@ class GameService:
             limit = chess.engine.Limit(time=seconds)
             before_info = self.analysis.analyse(before_board, limit)
             after_info = self.analysis.analyse(self.board, limit)
-            before_score = before_info["score"].pov(chess.WHITE)
-            after_score = after_info["score"].pov(chess.WHITE)
+            player_color = chess.WHITE if self.user_color == "white" else chess.BLACK
+            before_score = before_info["score"].pov(player_color)
+            after_score = after_info["score"].pov(player_color)
             before_cp = before_score.score(mate_score=10000)
             after_cp = after_score.score(mate_score=10000)
             if before_cp is None or after_cp is None:
@@ -568,7 +587,8 @@ class GameService:
 
             # `after_score` is already a POV-specific Score (Cp or Mate), so
             # convert the original PovScore for Maia's perspective instead.
-            score = after_info["score"].pov(chess.BLACK)
+            opponent_color = not player_color
+            score = after_info["score"].pov(opponent_color)
             mate = score.mate()
             losing = mate is not None and mate < 0
             if mate is None:
@@ -595,6 +615,7 @@ class GameService:
                 self.store.save_position(self.game_id, self.board, self.initial_fen, self.started_at)
                 self.store.abandon(self.game_id)
             self.board = restored
+            self.user_color = saved_game.get("user_color", "white")
             self.initial_fen = saved_game["initial_fen"]
             self.game_id = int(saved_game["id"])
             self.started_at = saved_game["started_at"]
@@ -979,8 +1000,8 @@ def get_game() -> Dict[str, Any]:
 
 
 @app.post("/api/game/new")
-def new_game() -> Dict[str, Any]:
-    return service.start_new_game()
+def new_game(request: NewGameRequest = NewGameRequest()) -> Dict[str, Any]:
+    return service.start_new_game(request.user_color)
 
 
 @app.post("/api/game/resign")

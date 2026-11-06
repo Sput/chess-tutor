@@ -14,6 +14,7 @@ type SavedGame = {
 };
 type GameSnapshot = {
   fen: string;
+  user_color: 'white' | 'black';
   captured_by_white: string[];
   captured_by_black: string[];
   game_id: number;
@@ -91,6 +92,7 @@ async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
 
 export default function App() {
   const [game, setGame] = useState<GameSnapshot | null>(null);
+  const [newGameColor, setNewGameColor] = useState<'white' | 'black'>('white');
   const [busy, setBusy] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [evaluation, setEvaluation] = useState<PositionEvaluation | null>(null);
@@ -212,8 +214,8 @@ export default function App() {
     sourceSquare: string;
     targetSquare: string | null;
   }) {
-    if (!targetSquare || busy || !game?.opponent_engine_available || game.turn !== 'white' || game.game_over) return false;
-    if (piece.pieceType === 'wP' && targetSquare.endsWith('8')) {
+    if (!targetSquare || busy || !game?.opponent_engine_available || game.turn !== game.user_color || game.game_over) return false;
+    if (piece.pieceType === `${game.user_color === 'white' ? 'w' : 'b'}P` && targetSquare.endsWith(game.user_color === 'white' ? '8' : '1')) {
       setPendingPromotion({ from: sourceSquare, to: targetSquare });
       return false;
     }
@@ -253,7 +255,7 @@ export default function App() {
     setReviewError(null);
     setSelectedReviewPly(null);
     try {
-      const snapshot = await apiRequest<GameSnapshot>('/api/game/new', { method: 'POST' });
+      const snapshot = await apiRequest<GameSnapshot>('/api/game/new', { method: 'POST', body: JSON.stringify({ user_color: newGameColor }) });
       setGame(snapshot);
       void refreshSavedGames();
       setMessage(snapshot.opponent_engine_available
@@ -391,11 +393,13 @@ export default function App() {
   const materialValues: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9 };
   const whiteMaterial = (game?.captured_by_white ?? []).reduce((sum, piece) => sum + (materialValues[piece.toLowerCase()] ?? 0), 0);
   const blackMaterial = (game?.captured_by_black ?? []).reduce((sum, piece) => sum + (materialValues[piece.toLowerCase()] ?? 0), 0);
-  const scoreText = whiteMaterial === blackMaterial ? 'Even' : `${whiteMaterial > blackMaterial ? 'You' : 'Maia-3'} +${Math.abs(whiteMaterial - blackMaterial)}`;
+  const playerMaterial = game?.user_color === 'black' ? blackMaterial : whiteMaterial;
+  const opponentMaterial = game?.user_color === 'black' ? whiteMaterial : blackMaterial;
+  const scoreText = playerMaterial === opponentMaterial ? 'Even' : `${playerMaterial > opponentMaterial ? 'You' : 'Maia-3'} +${Math.abs(playerMaterial - opponentMaterial)}`;
   const evaluationText = evaluation?.mate_white != null
     ? `Mate ${evaluation.mate_white > 0 ? 'in ' + evaluation.mate_white : 'against you in ' + Math.abs(evaluation.mate_white)}`
     : evaluation?.score_cp_white != null
-      ? `${evaluation.score_cp_white > 0 ? '+' : ''}${(evaluation.score_cp_white / 100).toFixed(1)} pawns ${evaluation.score_cp_white > 0 ? 'for you' : evaluation.score_cp_white < 0 ? 'for Maia-3' : '· even'}`
+      ? `${((game?.user_color === 'black' ? -evaluation.score_cp_white : evaluation.score_cp_white) > 0 ? '+' : '')}${((game?.user_color === 'black' ? -evaluation.score_cp_white : evaluation.score_cp_white) / 100).toFixed(1)} pawns ${((game?.user_color === 'black' ? -evaluation.score_cp_white : evaluation.score_cp_white) > 0) ? 'for you' : ((game?.user_color === 'black' ? -evaluation.score_cp_white : evaluation.score_cp_white) < 0) ? 'for Maia-3' : '· even'}`
       : game?.analysis_engine_available ? 'Evaluating…' : 'Unavailable';
   const selectedMoment = review?.moments.find((moment) => moment.ply === selectedReviewPly) ?? null;
   const displayedBoardPosition = review?.game_id === game?.game_id && selectedMoment
@@ -406,27 +410,28 @@ export default function App() {
   const displayedIsCheckmate = selectedReviewIsCurrentGame && selectedMoment ? selectedMoment.is_checkmate_after : game?.termination === 'checkmate';
   const displayedTurn = selectedReviewIsCurrentGame && selectedMoment ? selectedMoment.turn_after : game?.turn;
   const displayedCheckSquare = selectedReviewIsCurrentGame && selectedMoment ? selectedMoment.check_square_after : game?.check_square ?? null;
+  const playerWon = game?.result === (game?.user_color === 'black' ? '0-1' : '1-0');
   const checkSquareStyles = displayedCheckSquare
     ? { [displayedCheckSquare]: { backgroundColor: 'rgba(207, 67, 57, 0.78)', boxShadow: 'inset 0 0 0 4px rgba(150, 35, 30, 0.92)' } }
     : {};
-  const canMove = Boolean(game?.opponent_engine_available && game.turn === 'white' && !game.game_over && !busy && !analyzing && !coaching);
-  let playerStatus = game?.turn === 'white' ? 'White · Your turn' : 'White · Waiting for Maia-3';
+  const canMove = Boolean(game?.opponent_engine_available && game.turn === game.user_color && !game.game_over && !busy && !analyzing && !coaching);
+  let playerStatus = game && game.turn === game.user_color ? `${game.user_color === 'white' ? 'White' : 'Black'} · Your turn` : `${game?.user_color === 'white' ? 'Black' : 'White'} · Waiting for Maia-3`;
   if (selectedReviewIsCurrentGame && selectedMoment) {
     if (selectedMoment.is_checkmate_after) {
-      playerStatus = game?.result === '1-0' ? 'Review · Checkmate, you won' : 'Review · Checkmate, Maia-3 won';
+      playerStatus = playerWon ? 'Review · Checkmate, you won' : 'Review · Checkmate, Maia-3 won';
     } else if (selectedMoment.is_check_after) {
       playerStatus = `Review · Check on ${selectedMoment.turn_after === 'white' ? 'your' : 'Maia-3’s'} king`;
     } else {
       playerStatus = `Review · After ${selectedMoment.move_number}${selectedMoment.side === 'white' ? '.' : '…'} ${selectedMoment.san}`;
     }
   } else if (game?.termination === 'checkmate') {
-    playerStatus = game.result === '1-0' ? 'Checkmate · You won' : 'Checkmate · Maia-3 won';
+    playerStatus = playerWon ? 'Checkmate · You won' : 'Checkmate · Maia-3 won';
   } else if (game?.game_over) {
     playerStatus = game.termination === 'resignation'
-      ? game.result === '1-0' ? 'Maia-3 resigned · You win' : 'You resigned · Maia-3 wins'
+      ? playerWon ? 'Maia-3 resigned · You win' : 'You resigned · Maia-3 wins'
       : `Game over · ${game.result}`;
   } else if (game?.is_check) {
-    playerStatus = game.turn === 'white' ? 'Check · Your king is attacked' : 'Check · Maia-3 is attacked';
+    playerStatus = game.turn === game.user_color ? 'Check · Your king is attacked' : 'Check · Maia-3 is attacked';
   }
 
   return (
@@ -438,16 +443,16 @@ export default function App() {
 
       <div className="workspace">
         <section className="play-column" aria-label="Chess game">
-          <div className="game-heading"><div><p className="eyebrow">PLAY & LEARN</p><h1>A thoughtful game</h1></div><div className="game-controls"><div className="live-score" aria-live="polite"><span>Stockfish · White POV</span><strong>{evaluationText}</strong><span>Material</span><strong>{scoreText}</strong></div><button className="resign-button" onClick={() => void resignGame()} disabled={!game || game.game_over || busy || coaching || analyzing || reviewingGame || savingSettings}>Resign</button><button className="new-game" onClick={startNewGame} disabled={busy || coaching || analyzing || reviewingGame || savingSettings}><span>＋</span> New game</button></div></div>
+          <div className="game-heading"><div><p className="eyebrow">PLAY & LEARN</p><h1>A thoughtful game</h1></div><div className="game-controls"><div className="live-score" aria-live="polite"><span>Stockfish · Your POV</span><strong>{evaluationText}</strong><span>Material</span><strong>{scoreText}</strong></div><button className="resign-button" onClick={() => void resignGame()} disabled={!game || game.game_over || busy || coaching || analyzing || reviewingGame || savingSettings}>Resign</button><select className="setting-select color-select" aria-label="Choose your color for the next game" value={newGameColor} onChange={(event) => setNewGameColor(event.target.value as 'white' | 'black')} disabled={busy || coaching || analyzing || reviewingGame || savingSettings}><option value="white">Play White</option><option value="black">Play Black</option></select><button className="new-game" onClick={startNewGame} disabled={busy || coaching || analyzing || reviewingGame || savingSettings}><span>＋</span> New game</button></div></div>
 
           <div className="board-card">
-            <div className="opponent-row"><div className="player-piece engine-avatar">♟</div><div className="player-info"><strong>Maia-3</strong><span>{busy ? 'Thinking…' : 'Human-like opponent'}</span></div><span className="captured-pieces" aria-label={`Pieces captured by Maia-3: ${(game?.captured_by_black ?? []).map((piece) => pieceGlyph[piece]).join(' ') || 'none'}`}>{(game?.captured_by_black ?? []).map((piece, index) => <span key={index}>{pieceGlyph[piece]}</span>)}</span><span className="rating">~{game?.maia_elo ?? 1200}</span></div>
-            {displayedIsCheckmate ? <div className="board-state-alert checkmate-alert" role="status"><span className="alert-symbol">♚</span><div><strong>CHECKMATE</strong><span>{game?.result === '1-0' ? 'You won the game.' : 'Maia-3 won the game.'}</span></div></div> : game?.termination === 'resignation' ? <div className="board-state-alert checkmate-alert" role="status"><span className="alert-symbol">♚</span><div><strong>{game.result === '1-0' ? 'MAIA-3 RESIGNS' : 'YOU RESIGNED'}</strong><span>{game.result === '1-0' ? 'You won the game.' : 'Maia-3 won the game.'}</span></div></div> : displayedIsCheck ? <div className="board-state-alert check-alert" role="alert"><span className="alert-symbol">!</span><div><strong>CHECK</strong><span>{displayedTurn === 'white' ? 'Your king is under attack. Find a legal response.' : 'Maia-3’s king is under attack.'}</span></div></div> : null}
+            <div className="opponent-row"><div className="player-piece engine-avatar">♟</div><div className="player-info"><strong>Maia-3</strong><span>{busy ? 'Thinking…' : 'Human-like opponent'}</span></div><span className="captured-pieces" aria-label={`Pieces captured by Maia-3: ${(game?.user_color === 'black' ? game.captured_by_white : game?.captured_by_black ?? []).map((piece) => pieceGlyph[piece]).join(' ') || 'none'}`}>{(game?.user_color === 'black' ? game.captured_by_white : game?.captured_by_black ?? []).map((piece, index) => <span key={index}>{pieceGlyph[piece]}</span>)}</span><span className="rating">~{game?.maia_elo ?? 1200}</span></div>
+            {displayedIsCheckmate ? <div className="board-state-alert checkmate-alert" role="status"><span className="alert-symbol">♚</span><div><strong>CHECKMATE</strong><span>{playerWon ? 'You won the game.' : 'Maia-3 won the game.'}</span></div></div> : game?.termination === 'resignation' ? <div className="board-state-alert checkmate-alert" role="status"><span className="alert-symbol">♚</span><div><strong>{playerWon ? 'MAIA-3 RESIGNS' : 'YOU RESIGNED'}</strong><span>{playerWon ? 'You won the game.' : 'Maia-3 won the game.'}</span></div></div> : displayedIsCheck ? <div className="board-state-alert check-alert" role="alert"><span className="alert-symbol">!</span><div><strong>CHECK</strong><span>{displayedTurn === game?.user_color ? 'Your king is under attack. Find a legal response.' : 'Maia-3’s king is under attack.'}</span></div></div> : null}
             <div className="board-wrap">
-              <Chessboard options={{ position: displayedBoardPosition, squareStyles: checkSquareStyles, onPieceDrop, boardOrientation: 'white', allowDragging: canMove, animationDurationInMs: 180, boardStyle: { borderRadius: '8px', boxShadow: '0 3px 18px rgba(32, 45, 39, 0.12)' }, darkSquareStyle: { backgroundColor: '#78917f' }, lightSquareStyle: { backgroundColor: '#edf0e6' }, showNotation: true }} />
+              <Chessboard options={{ position: displayedBoardPosition, squareStyles: checkSquareStyles, onPieceDrop, boardOrientation: game?.user_color ?? 'white', allowDragging: canMove, animationDurationInMs: 180, boardStyle: { borderRadius: '8px', boxShadow: '0 3px 18px rgba(32, 45, 39, 0.12)' }, darkSquareStyle: { backgroundColor: '#78917f' }, lightSquareStyle: { backgroundColor: '#edf0e6' }, showNotation: true }} />
               {pendingPromotion && <div className="promotion-shade" role="dialog" aria-label="Choose a promotion piece"><div className="promotion-dialog"><strong>Promote pawn to</strong><div>{[['q', '♕'], ['r', '♖'], ['b', '♗'], ['n', '♘']].map(([piece, glyph]) => <button key={piece} onClick={() => void submitMove(pendingPromotion.from, pendingPromotion.to, piece)} aria-label={`Promote to ${piece}`}>{glyph}</button>)}</div><button className="cancel-promotion" onClick={() => setPendingPromotion(null)}>Cancel</button></div></div>}
             </div>
-            <div className="player-row"><div className="player-piece user-avatar">♙</div><div className="player-info"><strong>You</strong><span>{playerStatus}</span></div><span className="captured-pieces" aria-label={`Pieces captured by you: ${(game?.captured_by_white ?? []).map((piece) => pieceGlyph[piece]).join(' ') || 'none'}`}>{(game?.captured_by_white ?? []).map((piece, index) => <span key={index}>{pieceGlyph[piece]}</span>)}</span><span className="rating">{game?.player_rating ? game.player_rating : 'Unrated'}</span></div>
+            <div className="player-row"><div className="player-piece user-avatar">♙</div><div className="player-info"><strong>You</strong><span>{playerStatus}</span></div><span className="captured-pieces" aria-label={`Pieces captured by you: ${(game?.user_color === 'black' ? game.captured_by_black : game?.captured_by_white ?? []).map((piece) => pieceGlyph[piece]).join(' ') || 'none'}`}>{(game?.user_color === 'black' ? game.captured_by_black : game?.captured_by_white ?? []).map((piece, index) => <span key={index}>{pieceGlyph[piece]}</span>)}</span><span className="rating">{game?.player_rating ? game.player_rating : 'Unrated'}</span></div>
           </div>
 
           <div className="moves-card"><div className="section-title"><h2>Move history</h2><div className="move-actions"><button className="subtle-button" onClick={analyzePosition} disabled={!game?.analysis_engine_available || analyzing || busy || coaching || reviewingGame}>{analyzing ? 'Analyzing…' : 'Analyze position'}</button>{game?.game_over && <button className="review-button" onClick={() => void reviewCompletedGame()} disabled={!game.analysis_engine_available || reviewingGame}>{reviewingGame ? 'Reviewing game…' : 'Review game'}</button>}</div></div><div className="move-list">{game?.moves.length ? Array.from({ length: Math.ceil(game.moves.length / 2) }, (_, index) => {

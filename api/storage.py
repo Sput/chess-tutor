@@ -106,7 +106,7 @@ class GameStore:
                     (version, utc_now()),
                 )
 
-    def create_game(self) -> int:
+    def create_game(self, user_color: str = "white") -> int:
         now = utc_now()
         board = chess.Board()
         pgn = self.make_pgn(board, board.fen(), None)
@@ -114,8 +114,8 @@ class GameStore:
             cursor = connection.execute(
                 """INSERT INTO games
                    (started_at, status, user_color, initial_fen, pgn, final_fen, created_at, updated_at)
-                   VALUES (?, 'active', 'white', ?, ?, ?, ?, ?)""",
-                (now, board.fen(), pgn, board.fen(), now, now),
+                   VALUES (?, 'active', ?, ?, ?, ?, ?, ?)""",
+                (now, user_color, board.fen(), pgn, board.fen(), now, now),
             )
             return int(cursor.lastrowid)
 
@@ -287,7 +287,7 @@ class GameStore:
         """Apply a completed game's Elo result once and persist the rating change."""
         with self.connect() as connection:
             game = connection.execute(
-                "SELECT status, result, rating_applied FROM games WHERE id = ?", (game_id,)
+                "SELECT status, result, rating_applied, user_color FROM games WHERE id = ?", (game_id,)
             ).fetchone()
             if game is None or game["status"] != "completed" or game["result"] not in ("1-0", "0-1", "1/2-1/2"):
                 return None
@@ -307,7 +307,9 @@ class GameStore:
                 "SELECT value FROM user_settings WHERE key = 'player_rating'"
             ).fetchone()
             before = int(setting["value"]) if setting and setting["value"] else 500
-            score = 1.0 if game["result"] == "1-0" else 0.0 if game["result"] == "0-1" else 0.5
+            score = (1.0 if game["result"] == "1-0" else 0.0) if game["user_color"] == "white" else (1.0 if game["result"] == "0-1" else 0.0)
+            if game["result"] == "1/2-1/2":
+                score = 0.5
             expected = 1.0 / (1.0 + 10.0 ** ((opponent_rating - before) / 400.0))
             after = max(100, min(3000, int(round(before + k_factor * (score - expected)))))
             delta = after - before
